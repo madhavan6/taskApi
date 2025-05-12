@@ -2,20 +2,20 @@ const express = require('express');
 const router = express.Router();
 const db = require('../db');
 
-// Unified Task Insert Function
+// POST /api/tasks
 router.post('/', (req, res) => {
-  const { projectId, parentId, name, level } = req.body;
+  const { projectId, parentId, name, mainTaskLevel } = req.body;
 
-  if (!projectId || !name || !level) {
-    return res.status(400).json({ error: 'projectId, name, and level are required' });
+  if (!projectId || !name || !mainTaskLevel) {
+    return res.status(400).json({ error: 'projectId, name, and mainTaskLevel are required' });
   }
 
   const validLevels = ['level1', 'level2', 'level3', 'level4'];
-  if (!validLevels.includes(level)) {
-    return res.status(400).json({ error: 'Invalid level' });
+  if (!validLevels.includes(mainTaskLevel)) {
+    return res.status(400).json({ error: 'Invalid mainTaskLevel' });
   }
 
-  // Helper function to build level hierarchy
+  // Helper function to construct subtask hierarchy
   function buildLevelIds(parentTask, currentLevel) {
     const levels = {
       level1: null,
@@ -39,34 +39,13 @@ router.post('/', (req, res) => {
     return levels;
   }
 
-  // Check if the parent exists in the correct level
-  function checkLevelAvailability(level, parentId, callback) {
-    let query = '';
-    
-    if (level === 'level2') {
-      query = `SELECT id FROM tasks WHERE id = ? AND level = 'level1'`;
-    } else if (level === 'level3') {
-      query = `SELECT id FROM tasks WHERE id = ? AND level = 'level2'`;
-    } else if (level === 'level4') {
-      query = `SELECT id FROM tasks WHERE id = ? AND level = 'level3'`;
-    }
-
-    if (query) {
-      db.query(query, [parentId], (err, results) => {
-        if (err || results.length === 0) {
-          return callback(true); // Level not available
-        }
-        callback(false); // Level available
-      });
-    } else {
-      callback(false); // Level 1 doesn't require a parent task, so it's always available
-    }
-  }
-
-  // For level 1, directly insert the task
-  if (level === 'level1') {
-    const sql = `INSERT INTO tasks (projectId, name, level, level1) VALUES (?, ?, 'level1', NULL)`;
-    db.query(sql, [projectId, name], (err, result) => {
+  // Handle level1 separately (no parentId needed)
+  if (mainTaskLevel === 'level1') {
+    const insertSql = `
+      INSERT INTO tasks (projectId, name, mainTaskLevel, level1)
+      VALUES (?, ?, 'level1', NULL)
+    `;
+    db.query(insertSql, [projectId, name], (err, result) => {
       if (err) return res.status(500).json({ error: 'DB error', details: err });
 
       const newId = result.insertId;
@@ -74,49 +53,45 @@ router.post('/', (req, res) => {
         if (updateErr) return res.status(500).json({ error: 'Update error', details: updateErr });
         res.status(201).json({ message: 'Level 1 task created', taskId: newId });
       });
-    });
+  });
   } else {
-    // Check if parent task exists at the correct level
-    checkLevelAvailability(level, parentId, (levelUnavailable) => {
-      if (levelUnavailable) {
-        return res.status(400).json({ error: `Parent task not available for level ${level}. You must insert tasks in sequence.` });
+    // Fetch parent task
+    db.query(`SELECT * FROM tasks WHERE id = ?`, [parentId], (err, results) => {
+      if (err || results.length === 0) {
+        return res.status(400).json({ error: 'Invalid parentId' });
       }
 
-      // Get parent task if available
-      db.query(`SELECT * FROM tasks WHERE id = ?`, [parentId], (err, results) => {
-        if (err || results.length === 0) {
-          return res.status(400).json({ error: 'Invalid parentId' });
-        }
+      const parent = results[0];
 
-        const parent = results[0];
-        const levels = buildLevelIds(parent, level);
+      // Prevent skipping levels (e.g., can't insert level3 before level2 exists)
+      if (mainTaskLevel === 'level2' && !parent.level1) {
+        return res.status(400).json({ error: 'Cannot insert level2 without level1 parent' });
+      }
+      if (mainTaskLevel === 'level3' && !parent.level2) {
+        return res.status(400).json({ error: 'Cannot insert level3 without level2 parent' });
+      }
+      if (mainTaskLevel === 'level4' && !parent.level3) {
+        return res.status(400).json({ error: 'Cannot insert level4 without level3 parent' });
+      }
 
-        // Check if the task already exists at the same level for the same project
-        db.query(`SELECT * FROM tasks WHERE projectId = ? AND name = ? AND level = ?`, [projectId, name, level], (dupErr, dupResults) => {
-          if (dupErr) return res.status(500).json({ error: 'DB error', details: dupErr });
-          if (dupResults.length > 0) {
-            return res.status(400).json({ error: 'Task with the same name already exists at this level' });
-          }
+      const levels = buildLevelIds(parent, mainTaskLevel);
 
-          const insertSql = `
-            INSERT INTO tasks (projectId, parentId, name, level, level1, level2, level3, level4)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-          `;
+      const insertSql = `
+        INSERT INTO tasks (projectId, name, mainTaskLevel, level1, level2, level3, level4)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `;
 
-          db.query(insertSql, [
-            parent.projectId,
-            parent.id,
-            name,
-            level,
-            levels.level1,
-            levels.level2,
-            levels.level3,
-            levels.level4,
-          ], (insertErr, result) => {
-            if (insertErr) return res.status(500).json({ error: 'DB error', details: insertErr });
-            res.status(201).json({ message: `${level} task created`, taskId: result.insertId });
-          });
-        });
+      db.query(insertSql, [
+        projectId,
+        name,
+        mainTaskLevel,
+        levels.level1,
+        levels.level2,
+        levels.level3,
+        levels.level4,
+      ], (insertErr, result) => {
+        if (insertErr) return res.status(500).json({ error: 'DB error', details: insertErr });
+        res.status(201).json({ message: `${mainTaskLevel} task created`, taskId: result.insertId });
       });
     });
   }
